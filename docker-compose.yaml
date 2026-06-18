@@ -1,0 +1,126 @@
+x-airflow-common:
+  &airflow-common
+  build: .
+  environment:
+    &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE: 'Europe/Moscow'
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./data:/opt/airflow/data
+    - ./logs:/opt/airflow/logs
+  depends_on:
+    postgres:
+      condition: service_healthy
+    clickhouse:
+      condition: service_started
+  env_file:
+    - .env
+  networks:
+    - etl_network
+
+services:
+  postgres:
+    image: postgres:13
+    container_name: etl-project-postgres-1
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    networks:
+      - etl_network
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: always
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.8
+    container_name: clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./clickhouse:/docker-entrypoint-initdb.d
+    environment:
+      CLICKHOUSE_DB: defects_db
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+    networks:
+      - etl_network
+    restart: always
+
+  webserver:
+    <<: *airflow-common
+    container_name: etl-project-webserver-1
+    command: >
+      bash -c "
+        airflow db migrate &&
+        airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true &&
+        airflow webserver
+      "
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    restart: always
+
+  scheduler:
+    <<: *airflow-common
+    container_name: etl-project-scheduler-1
+    command: scheduler
+    restart: always
+    depends_on:
+      webserver:
+        condition: service_healthy
+
+  superset:
+    image: apache/superset:3.1.3
+    container_name: superset
+    ports:
+      - "8088:8088"
+    environment:
+      SUPERSET_SECRET_KEY: your-secret-key-change-this-in-production
+      SUPERSET_CONFIG_PATH: /app/pythonpath/superset_config.py
+    volumes:
+      - ./superset_config.py:/app/pythonpath/superset_config.py
+      - superset-data:/app/superset_home
+    depends_on:
+      clickhouse:
+        condition: service_started
+    networks:
+      - etl_network
+    restart: always
+    command: >
+      bash -c "
+        superset db upgrade &&
+        superset init &&
+        superset fab create-admin --username admin --password admin --firstname Admin --lastname User --email admin@example.com || true &&
+        gunicorn --bind 0.0.0.0:8088 --workers 2 --timeout 60 --limit-request-line 0 --limit-request-field_size 0 'superset.app:create_app()'
+      "
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8088/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+networks:
+  etl_network:
+    driver: bridge
+
+volumes:
+  postgres-db-volume:
+  clickhouse-data:
+  superset-data:

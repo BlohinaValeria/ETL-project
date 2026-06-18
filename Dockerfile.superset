@@ -1,0 +1,19 @@
+FROM apache/superset:3.1.3
+
+USER root
+
+# Обновление pip и установка драйверов
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
+    clickhouse-connect==0.6.8 \
+    clickhouse-driver==0.2.6 \
+    psycopg2-binary \
+    redis
+
+# Копирование конфига
+COPY superset_config.py /app/pythonpath/superset_config.py
+
+# Смена владельца
+RUN chown -R superset:superset /app/pythonpath
+
+USER superset
